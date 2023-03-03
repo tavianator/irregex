@@ -1,10 +1,10 @@
 //! A simple regular expression engine.
 
 use nom::branch::alt;
-use nom::character::complete::char;
+use nom::character::complete::{char, none_of, one_of};
 use nom::combinator::{all_consuming, success};
 use nom::error::Error as NomError;
-use nom::sequence::delimited;
+use nom::sequence::{delimited, preceded};
 use nom::{Finish, IResult, Parser};
 
 /// A regular expression.
@@ -14,6 +14,8 @@ pub enum Regex {
     Empty,
     /// Matches any one character.
     Dot,
+    /// Matches a literal character.
+    Literal(char),
 }
 
 /// A regular expression matcher.
@@ -58,8 +60,18 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     // Dot : `.`
     let dot = char('.').map(|_| Regex::Dot);
 
-    // Regex : Dot | Group | Empty
-    alt((dot, group, empty))
+    // Meta : `\` | `(` | `)` | ...
+    let meta = r"\().";
+
+    // Literal : [^Meta]
+    let literal = none_of(meta).map(Regex::Literal);
+
+    // Escape : `\` Meta
+    let escape = preceded(char('\\'), one_of(meta))
+        .map(Regex::Literal);
+
+    // Regex : Literal | Escape | Dot | Group | Empty
+    alt((literal, escape, dot, group, empty))
         .parse(pattern)
 }
 
@@ -80,6 +92,9 @@ impl Regex {
             ),
             Self::Dot => Box::new(
                 Dot::default()
+            ),
+            Self::Literal(c) => Box::new(
+                Literal::new(*c)
             ),
         }
     }
@@ -128,6 +143,38 @@ impl Matcher for Dot {
     }
 }
 
+/// Matcher for Regex::Literal.
+#[derive(Debug)]
+pub struct Literal {
+    c: char,
+    started: bool,
+    matched: bool,
+}
+
+impl Literal {
+    /// Create a literal matcher.
+    fn new(c: char) -> Self {
+        Self {
+            c,
+            started: false,
+            matched: false,
+        }
+    }
+}
+
+impl Matcher for Literal {
+    fn start(&mut self) -> bool {
+        self.started = true;
+        self.matched
+    }
+
+    fn push(&mut self, c: char) -> bool {
+        self.matched = self.started && c == self.c;
+        self.started = false;
+        self.matched
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +205,13 @@ mod tests {
         assert_parse(r".", Regex::Dot);
         assert_parse(r"(.)", Regex::Dot);
 
+        assert_parse(r"a", Regex::Literal('a'));
+        assert_parse(r"\\", Regex::Literal('\\'));
+        assert_parse(r"\(", Regex::Literal('('));
+        assert_parse(r"\)", Regex::Literal(')'));
+        assert_parse(r"\.", Regex::Literal('.'));
+
+        assert_parse_err(r"\");
         assert_parse_err(r"(");
         assert_parse_err(r")");
     }
@@ -187,6 +241,12 @@ mod tests {
             r".",
             &["a", "b"],
             &["", "ab", "abc"],
+        );
+
+        assert_matches(
+            r"a",
+            &["a"],
+            &["", "b", "ab"],
         );
     }
 }
