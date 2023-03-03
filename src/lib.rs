@@ -25,6 +25,8 @@ pub enum Regex {
     Or(Box<Regex>, Box<Regex>),
     /// Matches one or more repetitions.
     Plus(Box<Regex>),
+    /// Matches zero or one times.
+    Maybe(Box<Regex>),
 }
 
 /// A regular expression matcher.
@@ -95,7 +97,7 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     let dot = char('.').map(|_| Regex::Dot);
 
     // Meta : `\` | `(` | `)` | ...
-    let meta = r"\().*|+";
+    let meta = r"\().*|+?";
 
     // Literal : [^Meta]
     let literal = none_of(meta).map(Regex::Literal);
@@ -110,12 +112,14 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     // Repeat : Atom
     //        | Repeat `*`
     //        | Repeat `+`
+    //        | Repeat `?`
     let repeat = flat_map(atom, |r| fold_many0(
-        one_of("*+"),
+        one_of("*+?"),
         move || r.clone(),
         |r, c| match c {
             '*' => r.star(),
             '+' => r.plus(),
+            '?' => r.maybe(),
             _ => unreachable!(),
         },
     ));
@@ -167,6 +171,9 @@ impl Regex {
             Self::Plus(r) => Box::new(
                 r.matcher().concat(r.matcher().star())
             ),
+            Self::Maybe(r) => Box::new(
+                r.matcher().or(Empty::default())
+            ),
         }
     }
 
@@ -193,6 +200,11 @@ impl Regex {
     /// Wrap this regex with the `+` operator.
     pub fn plus(self) -> Self {
         Self::Plus(self.into())
+    }
+
+    /// Wrap this regex with the `?` operator.
+    pub fn maybe(self) -> Self {
+        Self::Maybe(self.into())
     }
 }
 
@@ -365,6 +377,7 @@ mod tests {
         assert_parse(r"\.", Regex::Literal('.'));
         assert_parse(r"\*", Regex::Literal('*'));
         assert_parse(r"\+", Regex::Literal('+'));
+        assert_parse(r"\?", Regex::Literal('?'));
         assert_parse(r"\|", Regex::Literal('|'));
 
         assert_parse(r"()*", Regex::Empty.star());
@@ -391,6 +404,8 @@ mod tests {
         assert_parse("a+b*", a().plus().concat(b().star()));
         assert_parse("a+*", a().plus().star());
         assert_parse("a*+", a().star().plus());
+
+        assert_parse("a?", a().maybe());
 
         assert_parse_err(r"\");
         assert_parse_err(r"(");
@@ -494,6 +509,12 @@ mod tests {
             r"a+",
             &["a", "aa", "aaa"],
             &["", "ab", "ba"],
+        );
+
+        assert_matches(
+            r"a?",
+            &["", "a"],
+            &["b", "aa"],
         );
     }
 }
