@@ -4,7 +4,7 @@ use nom::branch::alt;
 use nom::character::complete::{char, none_of, one_of};
 use nom::combinator::{all_consuming, flat_map, success};
 use nom::error::Error as NomError;
-use nom::multi::{fold_many0, many1};
+use nom::multi::{fold_many0, many1, separated_list1};
 use nom::sequence::{delimited, preceded};
 use nom::{Finish, IResult, Parser};
 
@@ -21,6 +21,8 @@ pub enum Regex {
     Star(Box<Regex>),
     /// Matches two patterns in a row.
     Concat(Box<Regex>, Box<Regex>),
+    /// Matches either of two patterns.
+    Or(Box<Regex>, Box<Regex>),
 }
 
 /// A regular expression matcher.
@@ -62,6 +64,11 @@ pub trait MatcherExt: Matcher + Sized {
     fn concat<T: Matcher>(self, other: T) -> Concat<Self, T> {
         Concat::new(self, other)
     }
+
+    /// Alternate two matchers.
+    fn or<T: Matcher>(self, other: T) -> Or<Self, T> {
+        Or(self, other)
+    }
 }
 
 impl<T: Matcher> MatcherExt for T {}
@@ -86,7 +93,7 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     let dot = char('.').map(|_| Regex::Dot);
 
     // Meta : `\` | `(` | `)` | ...
-    let meta = r"\().*";
+    let meta = r"\().*|";
 
     // Literal : [^Meta]
     let literal = none_of(meta).map(Regex::Literal);
@@ -110,8 +117,13 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     let word = many1(repeat)
         .map(|v| reduce(v, Regex::concat));
 
-    // Regex : Word | Empty
-    alt((word, empty))
+    // Chunk : Word | Empty
+    let chunk = alt((word, empty));
+
+    // Regex : Chunk
+    //       | Regex `|` Chunk
+    separated_list1(char('|'), chunk)
+        .map(|v| reduce(v, Regex::or))
         .parse(pattern)
 }
 
@@ -142,6 +154,9 @@ impl Regex {
             Self::Concat(a, b) => Box::new(
                 a.matcher().concat(b.matcher())
             ),
+            Self::Or(a, b) => Box::new(
+                a.matcher().or(b.matcher())
+            ),
         }
     }
 
@@ -158,6 +173,11 @@ impl Regex {
     /// Concatenate two regexes.
     pub fn concat(self, other: Self) -> Self {
         Self::Concat(self.into(), other.into())
+    }
+
+    /// Alternate two regexes.
+    pub fn or(self, other: Self) -> Self {
+        Self::Or(self.into(), other.into())
     }
 }
 
@@ -279,6 +299,20 @@ impl<L: Matcher, R: Matcher> Matcher for Concat<L, R> {
     }
 }
 
+/// Matcher for Regex::Or.
+#[derive(Debug)]
+pub struct Or<T, U>(T, U);
+
+impl<T: Matcher, U: Matcher> Matcher for Or<T, U> {
+    fn start(&mut self) -> bool {
+        self.0.start() | self.1.start()
+    }
+
+    fn push(&mut self, c: char) -> bool {
+        self.0.push(c) | self.1.push(c)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +349,7 @@ mod tests {
         assert_parse(r"\)", Regex::Literal(')'));
         assert_parse(r"\.", Regex::Literal('.'));
         assert_parse(r"\*", Regex::Literal('*'));
+        assert_parse(r"\|", Regex::Literal('|'));
 
         assert_parse(r"()*", Regex::Empty.star());
         assert_parse(r".*", Regex::Dot.star());
@@ -330,6 +365,11 @@ mod tests {
         assert_parse("a*b", a().star().concat(b()));
         assert_parse("ab*", a().concat(b().star()));
         assert_parse("(ab)*", a().concat(b()).star());
+
+        assert_parse("a|b", a().or(b()));
+        assert_parse("a|b*", a().or(b().star()));
+        assert_parse("ab|b", a().concat(b()).or(b()));
+        assert_parse("(ab|b)*", a().concat(b()).or(b()).star());
 
         assert_parse_err(r"\");
         assert_parse_err(r"(");
@@ -415,6 +455,18 @@ mod tests {
             r"ab*",
             &["a", "ab", "abb"],
             &["", "b", "ac", "abc"],
+        );
+
+        assert_matches(
+            r"a|b",
+            &["a", "b"],
+            &["", "aa", "ab", "bb"],
+        );
+
+        assert_matches(
+            r"(ab*|c)*",
+            &["", "a", "ab", "c", "abc", "abbacca"],
+            &["b", "acb"],
         );
     }
 }
