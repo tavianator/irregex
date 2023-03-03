@@ -12,6 +12,8 @@ use nom::{Finish, IResult, Parser};
 pub enum Regex {
     /// Matches the empty string.
     Empty,
+    /// Matches any one character.
+    Dot,
 }
 
 /// A regular expression matcher.
@@ -53,8 +55,11 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     // Group : `(` Regex `)`
     let group = delimited(char('('), regex, char(')'));
 
-    // Regex : Group | Empty
-    alt((group, empty))
+    // Dot : `.`
+    let dot = char('.').map(|_| Regex::Dot);
+
+    // Regex : Dot | Group | Empty
+    alt((dot, group, empty))
         .parse(pattern)
 }
 
@@ -72,6 +77,9 @@ impl Regex {
         match self {
             Self::Empty => Box::new(
                 Empty::default()
+            ),
+            Self::Dot => Box::new(
+                Dot::default()
             ),
         }
     }
@@ -97,6 +105,26 @@ impl Matcher for Empty {
     fn push(&mut self, _: char) -> bool {
         self.matched = false;
         false
+    }
+}
+
+/// Matcher for Regex::Dot.
+#[derive(Debug, Default)]
+pub struct Dot {
+    started: bool,
+    matched: bool,
+}
+
+impl Matcher for Dot {
+    fn start(&mut self) -> bool {
+        self.started = true;
+        self.matched
+    }
+
+    fn push(&mut self, _: char) -> bool {
+        self.matched = self.started;
+        self.started = false;
+        self.matched
     }
 }
 
@@ -127,6 +155,9 @@ mod tests {
         assert_parse(r"()", Regex::Empty);
         assert_parse(r"(())", Regex::Empty);
 
+        assert_parse(r".", Regex::Dot);
+        assert_parse(r"(.)", Regex::Dot);
+
         assert_parse_err(r"(");
         assert_parse_err(r")");
     }
@@ -150,6 +181,12 @@ mod tests {
             r"",
             &[""],
             &["a", "b", "ab"],
+        );
+
+        assert_matches(
+            r".",
+            &["a", "b"],
+            &["", "ab", "abc"],
         );
     }
 }
