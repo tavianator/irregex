@@ -2,8 +2,9 @@
 
 use nom::branch::alt;
 use nom::character::complete::{char, none_of, one_of};
-use nom::combinator::{all_consuming, success};
+use nom::combinator::{all_consuming, flat_map, success};
 use nom::error::Error as NomError;
+use nom::multi::fold_many0;
 use nom::sequence::{delimited, preceded};
 use nom::{Finish, IResult, Parser};
 
@@ -16,6 +17,8 @@ pub enum Regex {
     Dot,
     /// Matches a literal character.
     Literal(char),
+    /// Matches zero or more repetitions.
+    Star(Box<Regex>),
 }
 
 /// A regular expression matcher.
@@ -46,6 +49,16 @@ impl<T: Matcher + ?Sized> Matcher for Box<T> {
     }
 }
 
+/// Extension methods for matchers.
+pub trait MatcherExt: Matcher + Sized {
+    /// Wrap this matcher with the `*` operator.
+    fn star(self) -> Star<Self> {
+        Star(self)
+    }
+}
+
+impl<T: Matcher> MatcherExt for T {}
+
 /// An error parsing a regular expression.
 pub type ParseError<'a> = NomError<&'a str>;
 
@@ -61,7 +74,7 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     let dot = char('.').map(|_| Regex::Dot);
 
     // Meta : `\` | `(` | `)` | ...
-    let meta = r"\().";
+    let meta = r"\().*";
 
     // Literal : [^Meta]
     let literal = none_of(meta).map(Regex::Literal);
@@ -70,8 +83,19 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     let escape = preceded(char('\\'), one_of(meta))
         .map(Regex::Literal);
 
-    // Regex : Literal | Escape | Dot | Group | Empty
-    alt((literal, escape, dot, group, empty))
+    // Atom : Literal | Escape | Dot | Group
+    let atom = alt((literal, escape, dot, group));
+
+    // Repeat : Atom
+    //        | Repeat `*`
+    let repeat = flat_map(atom, |r| fold_many0(
+        char('*'),
+        move || r.clone(),
+        |r, _| r.star(),
+    ));
+
+    // Regex : Repeat | Empty
+    alt((repeat, empty))
         .parse(pattern)
 }
 
@@ -96,12 +120,20 @@ impl Regex {
             Self::Literal(c) => Box::new(
                 Literal::new(*c)
             ),
+            Self::Star(r) => Box::new(
+                r.matcher().star()
+            ),
         }
     }
 
     /// Test if a string matches.
     pub fn matches(&self, text: &str) -> bool {
         self.matcher().matches(text)
+    }
+
+    /// Wrap this regex with the `*` operator.
+    pub fn star(self) -> Self {
+        Self::Star(self.into())
     }
 }
 
@@ -175,6 +207,20 @@ impl Matcher for Literal {
     }
 }
 
+/// Matcher for Regex::Star.
+#[derive(Debug)]
+pub struct Star<T>(T);
+
+impl<T: Matcher> Matcher for Star<T> {
+    fn start(&mut self) -> bool {
+        self.0.start() || true
+    }
+
+    fn push(&mut self, c: char) -> bool {
+        self.0.push(c) && self.start()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +256,13 @@ mod tests {
         assert_parse(r"\(", Regex::Literal('('));
         assert_parse(r"\)", Regex::Literal(')'));
         assert_parse(r"\.", Regex::Literal('.'));
+        assert_parse(r"\*", Regex::Literal('*'));
+
+        assert_parse(r"()*", Regex::Empty.star());
+        assert_parse(r".*", Regex::Dot.star());
+        assert_parse(r"a*", Regex::Literal('a').star());
+        assert_parse(r"\**", Regex::Literal('*').star());
+        assert_parse(r".**", Regex::Dot.star().star());
 
         assert_parse_err(r"\");
         assert_parse_err(r"(");
@@ -247,6 +300,30 @@ mod tests {
             r"a",
             &["a"],
             &["", "b", "ab"],
+        );
+
+        assert_matches(
+            r"()*",
+            &[""],
+            &["a", "b", "ab"],
+        );
+
+        assert_matches(
+            r".*",
+            &["", "a", "b", "ab", "abc", "abcd"],
+            &[],
+        );
+
+        assert_matches(
+            r"a*",
+            &["", "a", "aa", "aaa"],
+            &["b", "ab", "ba", "aab", "aba", "baa"],
+        );
+
+        assert_matches(
+            r"a**",
+            &["", "a", "aa", "aaa"],
+            &["b", "ab", "ba", "aab", "aba", "baa"],
         );
     }
 }
