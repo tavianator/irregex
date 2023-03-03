@@ -23,6 +23,8 @@ pub enum Regex {
     Concat(Box<Regex>, Box<Regex>),
     /// Matches either of two patterns.
     Or(Box<Regex>, Box<Regex>),
+    /// Matches one or more repetitions.
+    Plus(Box<Regex>),
 }
 
 /// A regular expression matcher.
@@ -93,7 +95,7 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     let dot = char('.').map(|_| Regex::Dot);
 
     // Meta : `\` | `(` | `)` | ...
-    let meta = r"\().*|";
+    let meta = r"\().*|+";
 
     // Literal : [^Meta]
     let literal = none_of(meta).map(Regex::Literal);
@@ -107,10 +109,15 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
 
     // Repeat : Atom
     //        | Repeat `*`
+    //        | Repeat `+`
     let repeat = flat_map(atom, |r| fold_many0(
-        char('*'),
+        one_of("*+"),
         move || r.clone(),
-        |r, _| r.star(),
+        |r, c| match c {
+            '*' => r.star(),
+            '+' => r.plus(),
+            _ => unreachable!(),
+        },
     ));
 
     // Word : Repeat | Word Repeat
@@ -157,6 +164,9 @@ impl Regex {
             Self::Or(a, b) => Box::new(
                 a.matcher().or(b.matcher())
             ),
+            Self::Plus(r) => Box::new(
+                r.matcher().concat(r.matcher().star())
+            ),
         }
     }
 
@@ -178,6 +188,11 @@ impl Regex {
     /// Alternate two regexes.
     pub fn or(self, other: Self) -> Self {
         Self::Or(self.into(), other.into())
+    }
+
+    /// Wrap this regex with the `+` operator.
+    pub fn plus(self) -> Self {
+        Self::Plus(self.into())
     }
 }
 
@@ -349,6 +364,7 @@ mod tests {
         assert_parse(r"\)", Regex::Literal(')'));
         assert_parse(r"\.", Regex::Literal('.'));
         assert_parse(r"\*", Regex::Literal('*'));
+        assert_parse(r"\+", Regex::Literal('+'));
         assert_parse(r"\|", Regex::Literal('|'));
 
         assert_parse(r"()*", Regex::Empty.star());
@@ -370,6 +386,11 @@ mod tests {
         assert_parse("a|b*", a().or(b().star()));
         assert_parse("ab|b", a().concat(b()).or(b()));
         assert_parse("(ab|b)*", a().concat(b()).or(b()).star());
+
+        assert_parse("a+", a().plus());
+        assert_parse("a+b*", a().plus().concat(b().star()));
+        assert_parse("a+*", a().plus().star());
+        assert_parse("a*+", a().star().plus());
 
         assert_parse_err(r"\");
         assert_parse_err(r"(");
@@ -467,6 +488,12 @@ mod tests {
             r"(ab*|c)*",
             &["", "a", "ab", "c", "abc", "abbacca"],
             &["b", "acb"],
+        );
+
+        assert_matches(
+            r"a+",
+            &["a", "aa", "aaa"],
+            &["", "ab", "ba"],
         );
     }
 }
