@@ -4,7 +4,7 @@ use nom::branch::alt;
 use nom::character::complete::{char, none_of, one_of};
 use nom::combinator::{all_consuming, flat_map, success};
 use nom::error::Error as NomError;
-use nom::multi::{fold_many0, many1, separated_list1};
+use nom::multi::{fold_many0, many0_count, many1, separated_list1};
 use nom::sequence::{delimited, preceded};
 use nom::{Finish, IResult, Parser};
 
@@ -27,6 +27,8 @@ pub enum Regex {
     Plus(Box<Regex>),
     /// Matches zero or one times.
     Maybe(Box<Regex>),
+    /// Matches the opposite of a pattern.
+    Not(Box<Regex>),
 }
 
 /// A regular expression matcher.
@@ -73,6 +75,11 @@ pub trait MatcherExt: Matcher + Sized {
     fn or<T: Matcher>(self, other: T) -> Or<Self, T> {
         Or(self, other)
     }
+
+    /// Invert a matcher.
+    fn not(self) -> Not<Self> {
+        Not(self)
+    }
 }
 
 impl<T: Matcher> MatcherExt for T {}
@@ -97,7 +104,7 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     let dot = char('.').map(|_| Regex::Dot);
 
     // Meta : `\` | `(` | `)` | ...
-    let meta = r"\().*|+?";
+    let meta = r"\().*|+?!";
 
     // Literal : [^Meta]
     let literal = none_of(meta).map(Regex::Literal);
@@ -128,8 +135,14 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     let word = many1(repeat)
         .map(|v| reduce(v, Regex::concat));
 
-    // Chunk : Word | Empty
-    let chunk = alt((word, empty));
+    // NotWord : Word
+    //         | `!` NotWord
+    let not_word = many0_count(char('!'))
+        .and(word)
+        .map(|(n, r)| (0..n).fold(r, |r, _| r.not()));
+
+    // Chunk : NotWord | Empty
+    let chunk = alt((not_word, empty));
 
     // Regex : Chunk
     //       | Regex `|` Chunk
@@ -174,6 +187,9 @@ impl Regex {
             Self::Maybe(r) => Box::new(
                 r.matcher().or(Empty::default())
             ),
+            Self::Not(r) => Box::new(
+                r.matcher().not()
+            ),
         }
     }
 
@@ -205,6 +221,11 @@ impl Regex {
     /// Wrap this regex with the `?` operator.
     pub fn maybe(self) -> Self {
         Self::Maybe(self.into())
+    }
+
+    /// Invert a regex.
+    pub fn not(self) -> Self {
+        Self::Not(self.into())
     }
 }
 
@@ -340,6 +361,20 @@ impl<T: Matcher, U: Matcher> Matcher for Or<T, U> {
     }
 }
 
+/// Matcher for Regex::Not.
+#[derive(Debug)]
+pub struct Not<T>(T);
+
+impl<T: Matcher> Matcher for Not<T> {
+    fn start(&mut self) -> bool {
+        !self.0.start()
+    }
+
+    fn push(&mut self, c: char) -> bool {
+        !self.0.push(c)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +414,7 @@ mod tests {
         assert_parse(r"\+", Regex::Literal('+'));
         assert_parse(r"\?", Regex::Literal('?'));
         assert_parse(r"\|", Regex::Literal('|'));
+        assert_parse(r"\!", Regex::Literal('!'));
 
         assert_parse(r"()*", Regex::Empty.star());
         assert_parse(r".*", Regex::Dot.star());
@@ -406,6 +442,10 @@ mod tests {
         assert_parse("a*+", a().star().plus());
 
         assert_parse("a?", a().maybe());
+
+        assert_parse("!a", a().not());
+        assert_parse("!.*", Regex::Dot.star().not());
+        assert_parse("!a|b", a().not().or(b()));
 
         assert_parse_err(r"\");
         assert_parse_err(r"(");
@@ -515,6 +555,24 @@ mod tests {
             r"a?",
             &["", "a"],
             &["b", "aa"],
+        );
+
+        assert_matches(
+            r"!a",
+            &["", "b", "aa", "abc"],
+            &["a"],
+        );
+
+        assert_matches(
+            r"!.*",
+            &[],
+            &["", "a", "ab", "abc"],
+        );
+
+        assert_matches(
+            r"!(!(.*hello.*)|!(.*world.*))",
+            &["hello world", "world hello"],
+            &["", "hello", "world"],
         );
     }
 }
