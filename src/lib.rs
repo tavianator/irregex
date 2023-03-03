@@ -29,6 +29,8 @@ pub enum Regex {
     Maybe(Box<Regex>),
     /// Matches the opposite of a pattern.
     Not(Box<Regex>),
+    /// Matches the intersection of two patterns.
+    And(Box<Regex>, Box<Regex>),
 }
 
 /// A regular expression matcher.
@@ -80,6 +82,11 @@ pub trait MatcherExt: Matcher + Sized {
     fn not(self) -> Not<Self> {
         Not(self)
     }
+
+    /// Intersect two matchers.
+    fn and<T: Matcher>(self, other: T) -> And<Self, T> {
+        And(self, other)
+    }
 }
 
 impl<T: Matcher> MatcherExt for T {}
@@ -104,7 +111,7 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     let dot = char('.').map(|_| Regex::Dot);
 
     // Meta : `\` | `(` | `)` | ...
-    let meta = r"\().*|+?!";
+    let meta = r"\().*|+?!&";
 
     // Literal : [^Meta]
     let literal = none_of(meta).map(Regex::Literal);
@@ -144,9 +151,14 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
     // Chunk : NotWord | Empty
     let chunk = alt((not_word, empty));
 
-    // Regex : Chunk
-    //       | Regex `|` Chunk
-    separated_list1(char('|'), chunk)
+    // Clause : Chunk
+    //        | Alternate `&` Chunk
+    let clause = separated_list1(char('&'), chunk)
+        .map(|v| reduce(v, Regex::and));
+
+    // Regex : Clause
+    //       | Regex `|` Clause
+    separated_list1(char('|'), clause)
         .map(|v| reduce(v, Regex::or))
         .parse(pattern)
 }
@@ -190,6 +202,9 @@ impl Regex {
             Self::Not(r) => Box::new(
                 r.matcher().not()
             ),
+            Self::And(a, b) => Box::new(
+                a.matcher().and(b.matcher())
+            ),
         }
     }
 
@@ -226,6 +241,11 @@ impl Regex {
     /// Invert a regex.
     pub fn not(self) -> Self {
         Self::Not(self.into())
+    }
+
+    /// Intersect two regexes.
+    pub fn and(self, other: Self) -> Self {
+        Self::And(self.into(), other.into())
     }
 }
 
@@ -375,6 +395,20 @@ impl<T: Matcher> Matcher for Not<T> {
     }
 }
 
+/// Intersection matcher.
+#[derive(Debug)]
+pub struct And<T, U>(T, U);
+
+impl<T: Matcher, U: Matcher> Matcher for And<T, U> {
+    fn start(&mut self) -> bool {
+        self.0.start() & self.1.start()
+    }
+
+    fn push(&mut self, c: char) -> bool {
+        self.0.push(c) & self.1.push(c)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +449,7 @@ mod tests {
         assert_parse(r"\?", Regex::Literal('?'));
         assert_parse(r"\|", Regex::Literal('|'));
         assert_parse(r"\!", Regex::Literal('!'));
+        assert_parse(r"\&", Regex::Literal('&'));
 
         assert_parse(r"()*", Regex::Empty.star());
         assert_parse(r".*", Regex::Dot.star());
@@ -446,6 +481,10 @@ mod tests {
         assert_parse("!a", a().not());
         assert_parse("!.*", Regex::Dot.star().not());
         assert_parse("!a|b", a().not().or(b()));
+
+        assert_parse("a&b", a().and(b()));
+        assert_parse("a&!b|b", a().and(b().not()).or(b()));
+        assert_parse("a&(!b|b)", a().and(b().not().or(b())));
 
         assert_parse_err(r"\");
         assert_parse_err(r"(");
@@ -571,6 +610,24 @@ mod tests {
 
         assert_matches(
             r"!(!(.*hello.*)|!(.*world.*))",
+            &["hello world", "world hello"],
+            &["", "hello", "world"],
+        );
+
+        assert_matches(
+            r"a&a",
+            &["a"],
+            &["", "b", "ab"],
+        );
+
+        assert_matches(
+            r"a&b",
+            &[],
+            &["", "a", "b", "ab"],
+        );
+
+        assert_matches(
+            r"(.*hello.*)&(.*world.*)",
             &["hello world", "world hello"],
             &["", "hello", "world"],
         );
