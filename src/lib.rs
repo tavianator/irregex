@@ -4,7 +4,7 @@ use nom::branch::alt;
 use nom::character::complete::{char, none_of, one_of};
 use nom::combinator::{all_consuming, flat_map, success};
 use nom::error::Error as NomError;
-use nom::multi::fold_many0;
+use nom::multi::{fold_many0, many1};
 use nom::sequence::{delimited, preceded};
 use nom::{Finish, IResult, Parser};
 
@@ -19,6 +19,8 @@ pub enum Regex {
     Literal(char),
     /// Matches zero or more repetitions.
     Star(Box<Regex>),
+    /// Matches two patterns in a row.
+    Concat(Box<Regex>, Box<Regex>),
 }
 
 /// A regular expression matcher.
@@ -55,12 +57,22 @@ pub trait MatcherExt: Matcher + Sized {
     fn star(self) -> Star<Self> {
         Star(self)
     }
+
+    /// Concatenate two matchers.
+    fn concat<T: Matcher>(self, other: T) -> Concat<Self, T> {
+        Concat::new(self, other)
+    }
 }
 
 impl<T: Matcher> MatcherExt for T {}
 
 /// An error parsing a regular expression.
 pub type ParseError<'a> = NomError<&'a str>;
+
+/// Helper for applying binary operators.
+fn reduce<T>(v: Vec<T>, f: impl FnMut(T, T) -> T) -> T {
+    v.into_iter().reduce(f).unwrap()
+}
 
 /// Parser implementation.
 fn regex(pattern: &str) -> IResult<&str, Regex> {
@@ -94,8 +106,12 @@ fn regex(pattern: &str) -> IResult<&str, Regex> {
         |r, _| r.star(),
     ));
 
-    // Regex : Repeat | Empty
-    alt((repeat, empty))
+    // Word : Repeat | Word Repeat
+    let word = many1(repeat)
+        .map(|v| reduce(v, Regex::concat));
+
+    // Regex : Word | Empty
+    alt((word, empty))
         .parse(pattern)
 }
 
@@ -123,6 +139,9 @@ impl Regex {
             Self::Star(r) => Box::new(
                 r.matcher().star()
             ),
+            Self::Concat(a, b) => Box::new(
+                a.matcher().concat(b.matcher())
+            ),
         }
     }
 
@@ -134,6 +153,11 @@ impl Regex {
     /// Wrap this regex with the `*` operator.
     pub fn star(self) -> Self {
         Self::Star(self.into())
+    }
+
+    /// Concatenate two regexes.
+    pub fn concat(self, other: Self) -> Self {
+        Self::Concat(self.into(), other.into())
     }
 }
 
@@ -221,6 +245,40 @@ impl<T: Matcher> Matcher for Star<T> {
     }
 }
 
+/// Matcher for Regex::Concat.
+#[derive(Debug)]
+pub struct Concat<L, R> {
+    left: L,
+    right: R,
+    right_started: bool,
+}
+
+impl<L: Matcher, R: Matcher> Concat<L, R> {
+    fn new(left: L, right: R) -> Self {
+        Self {
+            left,
+            right,
+            right_started: false,
+        }
+    }
+
+    fn start_right(&mut self) -> bool {
+        self.right_started = true;
+        self.right.start()
+    }
+}
+
+impl<L: Matcher, R: Matcher> Matcher for Concat<L, R> {
+    fn start(&mut self) -> bool {
+        self.left.start() && self.start_right()
+    }
+
+    fn push(&mut self, c: char) -> bool {
+        (self.right_started && self.right.push(c))
+            | (self.left.push(c) && self.start_right())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +321,15 @@ mod tests {
         assert_parse(r"a*", Regex::Literal('a').star());
         assert_parse(r"\**", Regex::Literal('*').star());
         assert_parse(r".**", Regex::Dot.star().star());
+
+        let a = || Regex::Literal('a');
+        let b = || Regex::Literal('b');
+
+        assert_parse("ab", a().concat(b()));
+        assert_parse("ba", b().concat(a()));
+        assert_parse("a*b", a().star().concat(b()));
+        assert_parse("ab*", a().concat(b().star()));
+        assert_parse("(ab)*", a().concat(b()).star());
 
         assert_parse_err(r"\");
         assert_parse_err(r"(");
@@ -324,6 +391,30 @@ mod tests {
             r"a**",
             &["", "a", "aa", "aaa"],
             &["b", "ab", "ba", "aab", "aba", "baa"],
+        );
+
+        assert_matches(
+            r"a.c",
+            &["aac", "abc", "acc", "adc"],
+            &["", "a", "c", "ac", "aab", "bbc"],
+        );
+
+        assert_matches(
+            r"ab",
+            &["ab"],
+            &["", "a", "b", "ba", "abc"],
+        );
+
+        assert_matches(
+            r"a*b",
+            &["b", "ab", "aab"],
+            &["", "a", "ac", "abc"],
+        );
+
+        assert_matches(
+            r"ab*",
+            &["a", "ab", "abb"],
+            &["", "b", "ac", "abc"],
         );
     }
 }
